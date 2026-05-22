@@ -11,6 +11,7 @@ Or manually:
 1. Open HACS → three-dot menu (⋮) → **Custom repositories**
 2. Add `https://github.com/mikey0000/ha-mammotion-geojson-map-plugin` with category **Dashboard**
 3. Find **Mammotion GeoJSON Map Plugin** and click **Download**
+4. add the following to the map card (ha-map-card) url: /hacsfiles/ha-mammotion-geojson-map-plugin/geojson.js
 
 ## Requirements
 
