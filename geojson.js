@@ -463,7 +463,7 @@ export default (L, Plugin, Logger) => {
         pointToLayer: (feature, latlng) => {
           let name = feature.properties?.Name || feature.properties?.title;
           const type = feature.properties?.type_name;
-          if (type === "label" && name) {
+          if (type === "label" && name && name.toLowerCase().indexOf("obstacle") !== 0) {
             const labelMarker = this._createLabelMarker(name, latlng);
             this.labelLayer.addLayer(labelMarker);
             this._labelMarkers.push(labelMarker);
@@ -475,9 +475,11 @@ export default (L, Plugin, Logger) => {
           if (feature.geometry.type === "Polygon" && feature.properties?.Name) {
             const center = layer.getBounds().getCenter();
             const name = feature.properties.Name;
-            const labelMarker = this._createLabelMarker(name, center);
-            this.labelLayer.addLayer(labelMarker);
-            this._labelMarkers.push(labelMarker);
+            if (name.toLowerCase().indexOf("obstacle") !== 0) {
+                const labelMarker = this._createLabelMarker(name, center);
+                this.labelLayer.addLayer(labelMarker);
+                this._labelMarkers.push(labelMarker);
+            }
           }
         }
       });
