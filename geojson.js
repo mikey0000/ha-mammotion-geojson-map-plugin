@@ -40,21 +40,13 @@ export default (L, Plugin, Logger) => {
 
         const rotationDeg = Number(this.options.rotation_deg) || 0;
         if (rotationDeg !== 0) {
-          let originLat = this.options.rotation_origin_lat != null ? Number(this.options.rotation_origin_lat) : null;
-          let originLon = this.options.rotation_origin_lon != null ? Number(this.options.rotation_origin_lon) : null;
-
-          // Auto-calculate centroid if not given
-          if ((originLat == null || originLon == null) && (geoJsonData || mowPathGeoJsonData)) {
-            const center = this._getGeoJsonCenter(geoJsonData || mowPathGeoJsonData);
-            originLat = center.lat;
-            originLon = center.lon;
-            Logger.debug(`[GeoJsonLoader] Calculated rotation origin: (${originLat}, ${originLon})`);
-          }
-          if (originLat != null && originLon != null) {
-            if (geoJsonData) geoJsonData = this._rotateGeoJson(geoJsonData, rotationDeg, originLat, originLon);
-            if (mowPathGeoJsonData) mowPathGeoJsonData = this._rotateGeoJson(mowPathGeoJsonData, rotationDeg, originLat, originLon);
-            Logger.debug(`[GeoJsonLoader] Applied rotation: ${rotationDeg}° around (${originLat}, ${originLon})`);
-          }
+          // Fix the origin from the main map so later mow-path refreshes rotate
+          // around the same point and stay aligned with the zones.
+          this._rotationOrigin = null;
+          const origin = this._getRotationOrigin(geoJsonData || mowPathGeoJsonData);
+          if (geoJsonData) geoJsonData = this._rotateGeoJson(geoJsonData, rotationDeg, origin.lat, origin.lon);
+          if (mowPathGeoJsonData) mowPathGeoJsonData = this._rotateGeoJson(mowPathGeoJsonData, rotationDeg, origin.lat, origin.lon);
+          Logger.debug(`[GeoJsonLoader] Applied rotation: ${rotationDeg}° around (${origin.lat}, ${origin.lon})`);
         }
 
         if (this._isMounted && this.map.getContainer().parentNode) {
@@ -75,6 +67,8 @@ export default (L, Plugin, Logger) => {
 
             // Road base layer
             this.roadLayer = L.geoJSON(geoJsonData, {
+              renderer: this._getCanvasRenderer(),
+              interactive: false,
               filter: f => f.properties?.type_name === "path",
               style: feature => this._getFeatureStyle(feature)
             });
@@ -82,6 +76,8 @@ export default (L, Plugin, Logger) => {
 
             // Road overlay layer (center line)
             this.roadOverlayLayer = L.geoJSON(geoJsonData, {
+              renderer: this._getCanvasRenderer(),
+              interactive: false,
               filter: f => f.properties?.type_name === "path",
               style: feature => ({
                 color: feature.properties?.road_center_color || "#000000",
@@ -95,6 +91,8 @@ export default (L, Plugin, Logger) => {
 
           if (mowPathGeoJsonData) {
             this.mowPathLayer = L.geoJSON(mowPathGeoJsonData, {
+              renderer: this._getCanvasRenderer(),
+              interactive: false,
               style: feature => {
                 const style = this._getFeatureStyle(feature) || {};
                 style.weight = 1; // Render thin lines for mow path
@@ -121,7 +119,13 @@ export default (L, Plugin, Logger) => {
           }
         }
 
-        this._mowProgressInterval = setInterval(() => this._refreshMowProgress(), 180000);
+        // Clear any timer from a previous render so refreshes don't stack up.
+        if (this._mowProgressInterval) clearInterval(this._mowProgressInterval);
+        this._mowProgressInterval = null;
+        if (this.options.show_mow_path !== false) {
+          this._wasMowing = this._isMowing(entityId);
+          this._mowProgressInterval = setInterval(() => this._refreshMowProgress(), 180000);
+        }
       } catch (error) {
         Logger.error("[GeoJsonLoader] Error:", error);
       }
@@ -131,10 +135,19 @@ export default (L, Plugin, Logger) => {
       if (!this._isMounted) return;
 
       const entityId = this.options.entity_id || this.options.entity;
+
+      // The path only grows while mowing. Skip the fetch otherwise, but do one
+      // last refresh after mowing stops so the final coverage is shown.
+      const mowing = this._isMowing(entityId);
+      const wasMowing = this._wasMowing;
+      this._wasMowing = mowing;
+      if (!mowing && !wasMowing) return;
+
       let data = await this._loadMowPathGeoJsonData(entityId);
       if (!data) {
-        this._mowProgressInterval && clearInterval(this._mowProgressInterval);
-        Logger.warn("[GeoJsonLoader] No mow progress data to refresh");
+        // Skip this tick but keep the timer: the path is often empty at the
+        // start of a session. Retries are bounded since we only fetch while mowing.
+        Logger.debug("[GeoJsonLoader] No mow progress data to refresh");
         return;
       }
 
@@ -142,16 +155,8 @@ export default (L, Plugin, Logger) => {
 
       const rotationDeg = Number(this.options.rotation_deg) || 0;
       if (rotationDeg !== 0) {
-        let originLat = this.options.rotation_origin_lat != null ? Number(this.options.rotation_origin_lat) : null;
-        let originLon = this.options.rotation_origin_lon != null ? Number(this.options.rotation_origin_lon) : null;
-        if (originLat == null || originLon == null) {
-          const center = this._getGeoJsonCenter(data);
-          originLat = center.lat;
-          originLon = center.lon;
-        }
-        if (originLat != null && originLon != null) {
-          data = this._rotateGeoJson(data, rotationDeg, originLat, originLon);
-        }
+        const origin = this._getRotationOrigin(data);
+        data = this._rotateGeoJson(data, rotationDeg, origin.lat, origin.lon);
       }
 
       if (!this._isMounted) return;
@@ -162,6 +167,8 @@ export default (L, Plugin, Logger) => {
       }
 
       this.mowPathLayer = L.geoJSON(data, {
+        renderer: this._getCanvasRenderer(),
+        interactive: false,
         style: feature => {
           const style = this._getFeatureStyle(feature) || {};
           style.weight = 1;
@@ -172,13 +179,60 @@ export default (L, Plugin, Logger) => {
       Logger.debug("[GeoJsonLoader] Mow progress layer refreshed");
     }
 
+    /** Latest hass object; the one captured in the constructor goes stale. */
+    _getHass() {
+      return this._hass || document.querySelector('home-assistant')?.hass || this.hass;
+    }
+
+    _isMowing(entityId) {
+      return this._getHass()?.states?.[entityId]?.state === "mowing";
+    }
+
+    /**
+     * Rotation origin: the configured lat/lon if set, otherwise the centroid
+     * of `data`, cached so every render and refresh uses the same point.
+     */
+    _getRotationOrigin(data) {
+      const lat = this.options.rotation_origin_lat;
+      const lon = this.options.rotation_origin_lon;
+      if (lat != null && lon != null) return { lat: Number(lat), lon: Number(lon) };
+
+      if (!this._rotationOrigin) {
+        this._rotationOrigin = this._getGeoJsonCenter(data);
+        Logger.debug(`[GeoJsonLoader] Calculated rotation origin: (${this._rotationOrigin.lat}, ${this._rotationOrigin.lon})`);
+      }
+      return this._rotationOrigin;
+    }
+
+    /**
+     * Shared canvas renderer for the dense line layers (roads, mow path).
+     * Firefox struggles to draw long dashed SVG polylines and can freeze;
+     * canvas keeps that render cost low without thinning the geometry.
+     */
+    _getCanvasRenderer() {
+      if (!this._canvasRenderer) {
+        // Own pane, above the SVG overlays (400) and below markers/popups.
+        // The canvas spans the whole map and would otherwise swallow the
+        // mouse events the SVG zone popups rely on.
+        const paneName = "mammotionLinePane";
+        let pane = this.map.getPane(paneName);
+        if (!pane) {
+          pane = this.map.createPane(paneName);
+          pane.style.zIndex = 410;
+          pane.style.pointerEvents = "none";
+        }
+        this._canvasRenderer = L.canvas({ padding: 0.5, pane: paneName });
+      }
+      return this._canvasRenderer;
+    }
+
     async _loadGeoJsonData(entityId) {
       try {
         if (!entityId) {
           Logger.warn("[GeoJsonLoader] No entity_id provided in options");
           return null;
         }
-        const hass = this._hass || this.hass;
+        const hass = this._getHass();
         const response = await hass.callService(
           "mammotion",
           "get_geojson",
@@ -196,11 +250,12 @@ export default (L, Plugin, Logger) => {
 
     async _loadMowPathGeoJsonData(entityId) {
       try {
+        if (this.options.show_mow_path === false) return null;
         if (!entityId) {
           Logger.warn("[GeoJsonLoader] No entity_id provided in options");
           return null;
         }
-        const hass = this._hass || this.hass;
+        const hass = this._getHass();
         
         const serviceData = {
           entity_id: entityId,
@@ -553,6 +608,11 @@ export default (L, Plugin, Logger) => {
     }
 
     _rotatedMarkerPlugin() {
+      // Patch the shared L.Marker class only once; re-patching wraps _setPos
+      // again and stacks duplicate 'drag' hooks on every card construction.
+      if (L.Marker.prototype._mammotionRotatePatched) return;
+      L.Marker.prototype._mammotionRotatePatched = true;
+
       // save these original methods before they are overwritten
       var proto_initIcon = L.Marker.prototype._initIcon;
       var proto_setPos = L.Marker.prototype._setPos;
@@ -624,7 +684,7 @@ export default (L, Plugin, Logger) => {
       }
 
       // Clean up layers
-      const layers = [this.layer, this.roadLayer, this.roadOverlayLayer, this.mowPathLayer, this.rtk_and_dock, this.labelLayer];
+      const layers = [this.layer, this.roadLayer, this.roadOverlayLayer, this.mowPathLayer, this.rtk_and_dock, this.labelLayer, this._canvasRenderer];
       layers.forEach(layer => {
         if (layer) {
           try {
@@ -642,6 +702,8 @@ export default (L, Plugin, Logger) => {
       this.mowPathLayer = null;
       this.rtk_and_dock = null;
       this.labelLayer = null;
+      this._canvasRenderer = null;
+      this._rotationOrigin = null;
       this._labelMarkers = null;
       this._updateRoadStyle = null;
     }

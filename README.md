@@ -13,6 +13,31 @@ Or manually:
 3. Find **Mammotion GeoJSON Map Plugin** and click **Download**
 4. add the following to the map card (ha-map-card) url: /hacsfiles/ha-mammotion-geojson-map-plugin/geojson.js
 
+## Plugin options
+
+Set these under the geojson plugin's `options` in your `ha-map-card` config:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `entity_id` | – | The mower's `lawn_mower.*` entity. |
+| `rotation_deg` | `0` | Rotate the rendered GeoJSON by this many degrees. |
+| `rotation_origin_lat` / `rotation_origin_lon` | auto (centroid) | Optional rotation origin. |
+| `erase_by` | `"progress"` | Passed to `get_mow_progress_geojson`. |
+| `show_mow_path` | `true` | Set `false` to skip the mow-path/coverage layer (boundaries, zones, dock and mower marker still render). |
+
+Example:
+
+```yaml
+type: custom:map-card
+entities:
+  - entity: device_tracker.luba_xxxxxxxx_luba_xxxxxxxx
+plugins:
+  - name: geojson
+    url: /hacsfiles/ha-mammotion-geojson-map-plugin/geojson.js
+    options:
+      entity_id: lawn_mower.luba_xxxxxxxx
+```
+
 ## Requirements
 
 The **Mammotion** integration must be installed and at least one mower must have a synced map.
