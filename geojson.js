@@ -93,11 +93,7 @@ export default (L, Plugin, Logger) => {
             this.mowPathLayer = L.geoJSON(mowPathGeoJsonData, {
               renderer: this._getCanvasRenderer(),
               interactive: false,
-              style: feature => {
-                const style = this._getFeatureStyle(feature) || {};
-                style.weight = 1; // Render thin lines for mow path
-                return style;
-              }
+              style: feature => this._getMowProgressStyle(feature)
             });
             this.mowPathLayer.addTo(this.map);
             Logger.debug("[GeoJsonLoader] Mow Path Layer added successfully");
@@ -124,7 +120,7 @@ export default (L, Plugin, Logger) => {
         this._mowProgressInterval = null;
         if (this.options.show_mow_path !== false) {
           this._wasMowing = this._isMowing(entityId);
-          this._mowProgressInterval = setInterval(() => this._refreshMowProgress(), 180000);
+          this._mowProgressInterval = setInterval(() => this._refreshMowProgress(), 90000);
         }
       } catch (error) {
         Logger.error("[GeoJsonLoader] Error:", error);
@@ -144,9 +140,10 @@ export default (L, Plugin, Logger) => {
       if (!mowing && !wasMowing) return;
 
       let data = await this._loadMowPathGeoJsonData(entityId);
-      if (!data) {
-        // Skip this tick but keep the timer: the path is often empty at the
-        // start of a session. Retries are bounded since we only fetch while mowing.
+      if (data === undefined) return; // load failed: keep what is drawn and retry next tick
+      if (data === null) {
+        // Nothing to show any more (e.g. the job ended and the dynamics line was cleared).
+        this._removeMowPathLayer();
         Logger.debug("[GeoJsonLoader] No mow progress data to refresh");
         return;
       }
@@ -161,22 +158,28 @@ export default (L, Plugin, Logger) => {
 
       if (!this._isMounted) return;
 
-      if (this.mowPathLayer) {
-        try { this.mowPathLayer.remove(); } catch (e) {}
-        this.mowPathLayer = null;
-      }
+      this._removeMowPathLayer();
 
       this.mowPathLayer = L.geoJSON(data, {
         renderer: this._getCanvasRenderer(),
         interactive: false,
-        style: feature => {
-          const style = this._getFeatureStyle(feature) || {};
-          style.weight = 1;
-          return style;
-        }
+        style: feature => this._getMowProgressStyle(feature)
       });
       this.mowPathLayer.addTo(this.map);
       Logger.debug("[GeoJsonLoader] Mow progress layer refreshed");
+    }
+
+    _removeMowPathLayer() {
+      if (!this.mowPathLayer) return;
+      try { this.mowPathLayer.remove(); } catch (e) {}
+      this.mowPathLayer = null;
+    }
+
+    /** Cover-path progress is dense zigzags, so drawn thin; the dynamics line keeps its own weight. */
+    _getMowProgressStyle(feature) {
+      const style = this._getFeatureStyle(feature) || {};
+      if (feature.properties?.type_name !== "dynamics_line") style.weight = 1;
+      return style;
     }
 
     /** Latest hass object; the one captured in the constructor goes stale. */
@@ -279,7 +282,7 @@ export default (L, Plugin, Logger) => {
         return this.isEmpty(response?.response) ? null : response?.response;
       } catch (error) {
         Logger.warn("[GeoJsonLoader] Load error (get_mow_progress_geojson): " + (error.message || error));
-        return null;
+        return undefined;
       }
     }
 
